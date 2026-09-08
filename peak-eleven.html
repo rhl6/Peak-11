@@ -405,7 +405,7 @@ const PLAYERS = [
  {id:'f42',identity:'shearer',name:'阿兰·希勒',era:'1995–96 纽卡斯尔联',club:'纽卡斯尔联',nation:'英格兰',pos:'ST',alt:[],ovr:89,pac:76,sho:91,pas:66,dri:76,def:32,phy:86},
 
  // ===== 再扩充：补齐中场位置多样性（CDM/CM/LM/RM）+ 各大洲代表 + 现役与退役混合 =====
- {id:'gk10',identity:'navas',name:'凯拉·纳瓦斯',era:'2015–16 皇家马德里',club:'皇家马德里',nation:'哥斯达黎加',pos:'GK',alt:[],ovr:86,pac:54,sho:22,pas:62,dri:48,def:30,phy:78,gk:true},
+ {id:'gk10',identity:'navas',name:'凯洛尔·纳瓦斯',era:'2015–16 皇家马德里',club:'皇家马德里',nation:'哥斯达黎加',pos:'GK',alt:[],ovr:86,pac:54,sho:22,pas:62,dri:48,def:30,phy:78,gk:true},
 
  {id:'d29',identity:'hakimi',name:'哈基米',era:'2022–23 巴黎圣日耳曼',club:'巴黎圣日耳曼',nation:'摩洛哥',pos:'RB',alt:['RWB'],ovr:85,pac:95,sho:68,pas:75,dri:82,def:74,phy:72},
  {id:'d30',identity:'lucashernandez',name:'卢卡斯·埃尔南德斯',era:'2021–22 拜仁慕尼黑',club:'拜仁慕尼黑',nation:'法国',pos:'LB',alt:['CB'],ovr:84,pac:78,sho:42,pas:70,dri:68,def:82,phy:80},
@@ -953,7 +953,7 @@ const SEPARATE_GK_COUNT = 5;
 // Shared AI drafting heuristic: fill the biggest positional gap first, else best OVR.
 const AI_NEED_COUNTS = {GK:1,CB:4,LB:1,RB:1,LWB:1,RWB:1,CDM:1,CM:2,CAM:1,LW:1,RW:1,ST:2,LM:1,RM:1,CF:0};
 function instantAiDraft(sourcePool, count){
-  const pool = clone(sourcePool);
+  const pool = shuffle(clone(sourcePool)); // shuffle first so a tied greedy sort doesn't always land on the same order
   const squad = [];
   const have = {};
   while(squad.length < (count||16) && pool.length){
@@ -961,7 +961,10 @@ function instantAiDraft(sourcePool, count){
       const gapA = (AI_NEED_COUNTS[a.pos]||0) - (have[a.pos]||0);
       const gapB = (AI_NEED_COUNTS[b.pos]||0) - (have[b.pos]||0);
       if(gapA!==gapB) return gapB-gapA;
-      return b.ovr-a.ovr;
+      // small random jitter alongside OVR so the AI doesn't deterministically
+      // converge on the exact same 16 names a human's "一键组队" button would pick
+      // from the same full database (this used to make Free Pick vs AI mirror-identical).
+      return (b.ovr + Math.random()*5) - (a.ovr + Math.random()*5);
     });
     const chosen = pool.shift();
     squad.push(chosen);
@@ -990,6 +993,32 @@ function autoCompleteSquad(){
     S.userSquad.push(chosen);
     have[chosen.pos] = (have[chosen.pos]||0)+1;
     autoFillOneSlot(chosen);
+  }
+}
+// Cup-mode one-click complete: only safe to offer when there's exactly one
+// human in the cup (every entry in draftOrder is then this same team's turn),
+// since the shared draftPool is turn-based across humans and this can't
+// skip ahead through another real person's picks. Mirrors poolPick's cup
+// branch pick-by-pick (identity exclusion + advanceCupDraftIfNeeded) rather
+// than bulk-splicing, so draftPos and the eventual teamsetup handoff stay correct.
+function autoCompleteCupSquad(){
+  const cup = S.legendaryCup;
+  if(!cup || cup.humanCount!==1) return;
+  const have = {};
+  S.userSquad.forEach(p=>{ have[p.pos]=(have[p.pos]||0)+1; });
+  while(S.userSquad.length<16 && S.pool.length && cup.phase==='draft'){
+    S.pool.sort((a,b)=>{
+      const gapA = (AI_NEED_COUNTS[a.pos]||0) - (have[a.pos]||0);
+      const gapB = (AI_NEED_COUNTS[b.pos]||0) - (have[b.pos]||0);
+      if(gapA!==gapB) return gapB-gapA;
+      return b.ovr-a.ovr;
+    });
+    const chosen = S.pool.shift();
+    S.userSquad.push(chosen);
+    have[chosen.pos] = (have[chosen.pos]||0)+1;
+    autoFillOneSlot(chosen);
+    for(let i=S.pool.length-1;i>=0;i--){ if(S.pool[i].identity===chosen.identity) S.pool.splice(i,1); }
+    advanceCupDraftIfNeeded();
   }
 }
 
@@ -1574,7 +1603,7 @@ const S = {
    访客端只是把点击/输入转发给房主，再把房主广播回来的完整状态原样渲染
    出来——这样不需要把 4000 多行的游戏逻辑在两端各跑一份，也不会两边算
    出不一样的结果。 */
-const WS_URL = 'wss://YOUR-RELAY-SERVER.onrender.com'; // TODO: 换成你部署好的 server.js 的地址
+const WS_URL = 'wss://peak-eleven-relay-nqe7.onrender.com';
 
 function wsEnsureConnected(onOpen){
   if(S.net.ws && S.net.ws.readyState===WebSocket.OPEN){ onOpen&&onOpen(); return; }
@@ -1693,7 +1722,20 @@ function handleGuestAction(action){
   }
 }
 
+function checkBudgetStuckAutoAdvance(){
+  if(S.mode!=='budget' || S.screen!=='draft') return;
+  const userDone = S.userSquad.length>=6 || !S.pool.some(p=>priceOf(p)<=S.userBudgetLeft);
+  const aiDone = S.aiSquad.length>=6 || !S.pool.some(p=>priceOf(p)<=S.aiBudgetLeft);
+  if(userDone && aiDone) return; // both settled (full or stuck) — the "确认阵容" button takes over, no need to keep flipping turns
+  if(S.turn==='user' && S.userSquad.length<6 && userDone){
+    S.turn = 'ai';
+    if(S.opponentType==='ai') setTimeout(budgetAiPick, 420);
+  } else if(S.turn==='ai' && S.opponentType==='friend' && S.aiSquad.length<6 && aiDone){
+    S.turn = 'user';
+  }
+}
 function render(){
+  if(S.net.role!=='guest') checkBudgetStuckAutoAdvance();
   const app = $('#app');
   app.innerHTML = topbar() + screenHTML();
   if(S.net.role==='guest' && S.roomCode){
@@ -2103,8 +2145,10 @@ function autoFillOneSlot(p){
 const MODE_LABEL = {shared:'共同卡池 1v1', separate:'独立卡池', free:'自由选人', cup:'传奇杯赛'};
 
 function draftScreen(){
+  const userBudgetDone = S.userSquad.length>=6 || !S.pool.some(p=>priceOf(p)<=S.userBudgetLeft);
+  const aiBudgetDone = S.aiSquad.length>=6 || !S.pool.some(p=>priceOf(p)<=S.aiBudgetLeft);
   const done = S.mode==='budget'
-    ? (S.userSquad.length>=6 && S.aiSquad.length>=6)
+    ? (userBudgetDone && aiBudgetDone)
     : S.mode!=='cup' && S.userSquad.length>=16 && (S.mode!=='shared' || S.aiSquad.length>=16);
   const slots = FORMATIONS[S.formation];
   const usedIds = new Set(Object.values(S.lineup));
@@ -2126,7 +2170,9 @@ function draftScreen(){
       ? `不限卡池，直接从全部球员数据库中自由挑选。你已选 ${S.userSquad.length}/16。`
       : `不限卡池，直接从全部球员数据库中自由挑选。AI 已自动组建了一套强力阵容——两边允许选到同一个真实球员，所以不展示 AI 的具体名单。你已选 ${S.userSquad.length}/16。`;
   } else if(S.mode==='budget'){
-    subLine = `预算选秀 · 轮到 <b style="color:${S.turn==='user'?'var(--amber)':'var(--dim)'}">${S.turn==='user'?'你':'AI'}</b> 选人 · 你已选 ${S.userSquad.length}/6（剩余预算 ${S.userBudgetLeft}M）· AI 已选 ${S.aiSquad.length}/6（剩余预算 ${S.aiBudgetLeft}M）—— 只有买得起才能选中一名球员，价格已经标在每张卡片右上角。`;
+    const userStuck = S.userSquad.length<6 && userBudgetDone;
+    const aiStuck = S.aiSquad.length<6 && aiBudgetDone;
+    subLine = `预算选秀 · 轮到 <b style="color:${S.turn==='user'?'var(--amber)':'var(--dim)'}">${S.turn==='user'?'你':'AI'}</b> 选人 · 你已选 ${S.userSquad.length}/6（剩余预算 ${S.userBudgetLeft}M）· AI 已选 ${S.aiSquad.length}/6（剩余预算 ${S.aiBudgetLeft}M）—— 只有买得起才能选中一名球员，价格已经标在每张卡片右上角。${userStuck?'<br>⚠️ 你剩余的预算已经买不起卡池里任何一名球员了，选秀会以当前阵容自动结束。':''}${aiStuck?'<br>⚠️ AI 的预算也买不起剩下的球员了，它会以当前阵容结束选秀。':''}`;
   } else {
     const cup = S.legendaryCup;
     const activeTeam = cup.teams[cup.draftOrder[cup.draftPos]];
@@ -2166,7 +2212,7 @@ function draftScreen(){
           <button id="btn-refresh-pool" ${S.poolRefreshUsed?'disabled':''}>🔄 刷新候选卡池${S.poolRefreshUsed?'（已用完）':'（剩 1 次机会）'}</button>
           <span class="pmeta">只重新生成还没选的候选球员，已经选进你队伍里的人不受影响。</span>
         </div>` : ''}
-        ${(S.mode==='separate' || S.mode==='free') ? `<div style="margin-bottom:10px;">
+        ${(S.mode==='separate' || S.mode==='free' || (S.mode==='cup' && S.legendaryCup && S.legendaryCup.humanCount===1)) ? `<div style="margin-bottom:10px;">
           <button class="primary" id="btn-auto-complete-squad" ${S.userSquad.length>=16?'disabled':''}>⚡ 一键组队${S.userSquad.length>0 && S.userSquad.length<16?'（补齐剩余 '+(16-S.userSquad.length)+' 人）':''}</button>
           <span class="pmeta">可以自己先选一部分，剩下的空位会按位置需求和能力值自动补满。</span>
         </div>` : ''}
@@ -4190,7 +4236,10 @@ function wireEvents(){
     S.poolRefreshUsed = true;
     render();
   };
-  if(b('btn-auto-complete-squad')) b('btn-auto-complete-squad').onclick = ()=>{ autoCompleteSquad(); render(); };
+  if(b('btn-auto-complete-squad')) b('btn-auto-complete-squad').onclick = ()=>{
+    if(S.mode==='cup') autoCompleteCupSquad(); else autoCompleteSquad();
+    render();
+  };
 
   document.querySelectorAll('#pool-list .prow').forEach(el=>{
     el.onclick = ()=> poolPick(el.dataset.id);
